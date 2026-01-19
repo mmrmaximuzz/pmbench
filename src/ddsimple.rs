@@ -70,7 +70,7 @@ fn do_run(bdev: PathBuf, is_write: bool, blocksize: u64, nr_threads: usize) -> R
         return Err("number of threads should be at least 1".to_string());
     }
 
-    let stats: Vec<Arc<AtomicU64>> = vec![Arc::default(); nr_threads];
+    let stats: Vec<Arc<AtomicU64>> = (0..nr_threads).map(|_| Arc::default()).collect();
     let active_threads: AtomicUsize = AtomicUsize::new(nr_threads);
 
     let file = OpenOptions::new()
