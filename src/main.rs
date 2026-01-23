@@ -17,6 +17,7 @@
 use std::{env::args, process::exit};
 
 use pmbench::ddsimple;
+use pmbench::iperfsimple;
 
 fn main() {
     if let Err(e) = main_wrapper() {
@@ -33,6 +34,7 @@ fn main_wrapper() -> Result<(), String> {
 
     match argv[1].as_str() {
         "ddsimple" => ddsimple::run(&argv[2..]),
+        "iperfsimple" => iperfsimple::run(&argv[2..]),
         other_bench => Err(format!("benchmark {other_bench} not found")),
     }
 }

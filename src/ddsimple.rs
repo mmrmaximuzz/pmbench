@@ -29,32 +29,28 @@ use std::{
 
 use libc;
 
-pub fn run(argv: &[String]) -> Result<(), String> {
-    if let Err(e) = run_wrapper(argv) {
-        return Err(format!("ddsimple: {e}"));
-    }
-
-    Ok(())
+pub fn run(args: &[String]) -> Result<(), String> {
+    run_wrapper(args).map_err(|e| format!("ddsimple: {e}"))
 }
 
-fn run_wrapper(argv: &[String]) -> Result<(), String> {
-    if argv.len() != 4 {
+fn run_wrapper(args: &[String]) -> Result<(), String> {
+    if args.len() != 4 {
         return Err("usage: BDEV_PATH DATA_DIRECTION BLOCKSIZE NR_THREADS".to_string());
     }
 
-    let bdev = PathBuf::from_str(&argv[0])
-        .map_err(|e| format!("failed to create path from arg {}: {e}", argv[0]))?;
-    let is_write = match argv[1].as_str() {
+    let bdev = PathBuf::from_str(&args[0])
+        .map_err(|e| format!("failed to create path from arg {}: {e}", args[0]))?;
+    let is_write = match args[1].as_str() {
         "w" | "write" => true,
         "r" | "read" => false,
         other => return Err(format!("bad data direction '{other}'")),
     };
-    let blocksize: u64 = argv[2]
+    let blocksize: u64 = args[2]
         .parse()
-        .map_err(|e| format!("bad blocksize '{}': {e}", argv[2]))?;
-    let nr_threads: usize = argv[3]
+        .map_err(|e| format!("bad blocksize '{}': {e}", args[2]))?;
+    let nr_threads: usize = args[3]
         .parse()
-        .map_err(|e| format!("bad number of threads '{}': {e}", argv[3]))?;
+        .map_err(|e| format!("bad number of threads '{}': {e}", args[3]))?;
 
     do_run(bdev, is_write, blocksize, nr_threads)
 }
