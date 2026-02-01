@@ -16,11 +16,11 @@
 
 use std::{
     collections::HashMap,
-    io::Read,
+    io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread,
@@ -77,7 +77,9 @@ fn run_wrapper(args: &[String]) -> Result<(), String> {
         (Mode::Receiver, Protocol::Udp) => {
             run_udp_receiver(endpoint).map_err(|e| format!("udp receiver error: {e}"))
         }
-        (Mode::Sender, Protocol::Tcp) => todo!(),
+        (Mode::Sender, Protocol::Tcp) => {
+            run_tcp_sender(endpoint, &args[3..]).map_err(|e| format!("tcp sender error: {e}"))
+        }
         (Mode::Sender, Protocol::Udp) => todo!(),
     }
 }
@@ -85,6 +87,7 @@ fn run_wrapper(args: &[String]) -> Result<(), String> {
 enum StatsAction {
     Add(SocketAddr, Arc<(AtomicU64, AtomicU64)>),
     Del(SocketAddr),
+    Stop,
 }
 
 fn run_tcp_receiver(endpoint: String) -> Result<(), String> {
@@ -103,6 +106,42 @@ fn run_tcp_receiver(endpoint: String) -> Result<(), String> {
         let tx = tx.clone();
         thread::spawn(move || tcp_receiver_thread(client, addr, tx));
     }
+}
+
+fn run_tcp_sender(endpoint: String, args: &[String]) -> Result<(), String> {
+    let nr_threads = args[0]
+        .parse::<usize>()
+        .map_err(|e| format!("bad NR_THREADS '{}': {e}", args[0]))?;
+    let time = args[1]
+        .parse::<u64>()
+        .map_err(|e| format!("bad TIME '{}': {e}", args[1]))?;
+    let time = Duration::from_secs(time);
+
+    let (tx, rx) = mpsc::channel();
+    let stat = thread::spawn(move || statistics_thread(rx));
+    let signal = Arc::new(AtomicBool::default());
+
+    let mut senders = Vec::with_capacity(nr_threads);
+    for _ in 0..nr_threads {
+        let client =
+            TcpStream::connect(&endpoint).map_err(|e| format!("failed to connect: {e}"))?;
+        let tx = tx.clone();
+        let signal = signal.clone();
+        let handle = thread::spawn(move || tcp_sender_thread(client, tx, signal));
+        senders.push(handle);
+    }
+
+    // let the whole system work for the requested period of time
+    thread::sleep(time);
+
+    // stop all
+    signal.store(true, Ordering::Release);
+    for sender in senders {
+        sender.join().unwrap()
+    }
+    tx.send(StatsAction::Stop).unwrap();
+    stat.join().unwrap();
+    Ok(())
 }
 
 fn tcp_receiver_thread(mut client: TcpStream, addr: SocketAddr, tx: Sender<StatsAction>) {
@@ -128,6 +167,23 @@ fn tcp_receiver_thread(mut client: TcpStream, addr: SocketAddr, tx: Sender<Stats
     tx.send(StatsAction::Del(addr)).unwrap();
 }
 
+fn tcp_sender_thread(mut client: TcpStream, tx: Sender<StatsAction>, stopped: Arc<AtomicBool>) {
+    let buffer = [0u8; 65536];
+    let stats = Arc::new((AtomicU64::default(), AtomicU64::default()));
+
+    tx.send(StatsAction::Add(
+        client.local_addr().unwrap(),
+        stats.clone(),
+    ))
+    .unwrap();
+
+    while !stopped.load(Ordering::Acquire) {
+        let size = client.write(&buffer).unwrap();
+        stats.0.fetch_add(1, Ordering::Relaxed);
+        stats.1.fetch_add(size as u64, Ordering::Relaxed);
+    }
+}
+
 fn statistics_thread(rx: Receiver<StatsAction>) {
     let mut stats = HashMap::new();
     let mut last_time = chrono::Local::now();
@@ -143,6 +199,7 @@ fn statistics_thread(rx: Receiver<StatsAction>) {
                 Ok(StatsAction::Del(addr)) => {
                     stats.remove(&addr);
                 }
+                Ok(StatsAction::Stop) => return,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
