@@ -153,11 +153,13 @@ fn statistics_thread(rx: Receiver<StatsAction>) {
         last_time = curr_time;
         let timestring = curr_time.to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
 
-        for (addr, (stat, old_msgs, old_bytes)) in &stats {
+        for (addr, (stat, old_msgs, old_bytes)) in stats.iter_mut() {
             let new_msgs = stat.0.load(Ordering::Relaxed);
             let new_bytes = stat.1.load(Ordering::Relaxed);
-            let delta_msgs = new_msgs - old_msgs;
-            let delta_bytes = new_bytes - old_bytes;
+            let delta_msgs = new_msgs - *old_msgs;
+            let delta_bytes = new_bytes - *old_bytes;
+            *old_msgs = new_msgs;
+            *old_bytes = new_bytes;
 
             let kpps = delta_msgs as f64 / delta_time * 1e-3;
             let mbps = delta_bytes as f64 / delta_time * 8e-6;
