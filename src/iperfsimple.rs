@@ -17,13 +17,13 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -75,7 +75,7 @@ fn run_wrapper(args: &[String]) -> Result<(), String> {
             run_tcp_receiver(endpoint).map_err(|e| format!("tcp receiver error: {e}"))
         }
         (Mode::Receiver, Protocol::Udp) => {
-            run_udp_receiver(endpoint).map_err(|e| format!("udp receiver error: {e}"))
+            run_udp_receiver(endpoint, &args[3..]).map_err(|e| format!("udp receiver error: {e}"))
         }
         (Mode::Sender, Protocol::Tcp) => {
             run_tcp_sender(endpoint, &args[3..]).map_err(|e| format!("tcp sender error: {e}"))
@@ -85,8 +85,8 @@ fn run_wrapper(args: &[String]) -> Result<(), String> {
 }
 
 enum StatsAction {
-    Add(SocketAddr, Arc<(AtomicU64, AtomicU64)>),
-    Del(SocketAddr),
+    Add(String, Arc<(AtomicU64, AtomicU64)>),
+    Del(String),
     Stop,
 }
 
@@ -147,9 +147,11 @@ fn run_tcp_sender(endpoint: String, args: &[String]) -> Result<(), String> {
 fn tcp_receiver_thread(mut client: TcpStream, addr: SocketAddr, tx: Sender<StatsAction>) {
     let mut buffer = [0u8; 65536];
     let stats = Arc::new((AtomicU64::default(), AtomicU64::default()));
+    let key = addr.to_string();
 
     // notifier statistics thread that we are starting
-    tx.send(StatsAction::Add(addr, stats.clone())).unwrap();
+    tx.send(StatsAction::Add(key.clone(), stats.clone()))
+        .unwrap();
 
     loop {
         match client.read(&mut buffer) {
@@ -164,18 +166,16 @@ fn tcp_receiver_thread(mut client: TcpStream, addr: SocketAddr, tx: Sender<Stats
         }
     }
 
-    tx.send(StatsAction::Del(addr)).unwrap();
+    tx.send(StatsAction::Del(key)).unwrap();
 }
 
 fn tcp_sender_thread(mut client: TcpStream, tx: Sender<StatsAction>, stopped: Arc<AtomicBool>) {
     let buffer = [0u8; 65536];
     let stats = Arc::new((AtomicU64::default(), AtomicU64::default()));
+    let key = client.local_addr().unwrap().to_string();
 
-    tx.send(StatsAction::Add(
-        client.local_addr().unwrap(),
-        stats.clone(),
-    ))
-    .unwrap();
+    tx.send(StatsAction::Add(key.clone(), stats.clone()))
+        .unwrap();
 
     while !stopped.load(Ordering::Acquire) {
         let size = client.write(&buffer).unwrap();
@@ -225,6 +225,60 @@ fn statistics_thread(rx: Receiver<StatsAction>) {
     }
 }
 
-fn run_udp_receiver(_endpoint: String) -> Result<(), String> {
-    todo!()
+fn udp_receiver_thread(sock: UdpSocket, idx: usize, tx: Sender<StatsAction>) {
+    let mut buffer = [0u8; 65536];
+    let stats = Arc::new((AtomicU64::default(), AtomicU64::default()));
+    let key = format!("T{idx}");
+
+    tx.send(StatsAction::Add(key, stats.clone())).unwrap();
+
+    loop {
+        let s = sock.recv(&mut buffer).unwrap();
+        stats.0.fetch_add(1, Ordering::Relaxed);
+        stats.1.fetch_add(s as u64, Ordering::Relaxed);
+    }
+}
+
+fn run_udp_receiver(endpoint: String, args: &[String]) -> Result<(), String> {
+    if args.len() != 1 {
+        return Err("provide NR_THREADS".to_string());
+    }
+
+    let nr_threads = args[0]
+        .parse::<usize>()
+        .map_err(|e| format!("failed to parse nr_threads '{}': {e}", args[0]))?;
+
+    let socket =
+        UdpSocket::bind(endpoint).map_err(|e| format!("failed to bind UDP socket: {e}"))?;
+
+    // prepare sockets
+    let mut socks = vec![];
+    for _ in 0..nr_threads {
+        socks.push(
+            socket
+                .try_clone()
+                .map_err(|e| format!("failed to dup UDP socket: {e}"))?,
+        );
+    }
+
+    // prepare channel for stats
+    let (tx, rx) = mpsc::channel();
+
+    // run stats thread first
+    thread::spawn(move || statistics_thread(rx));
+
+    // run receiver threads
+    let threads: Vec<JoinHandle<()>> = socks
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let tx = tx.clone();
+            thread::spawn(move || udp_receiver_thread(s, i, tx))
+        })
+        .collect();
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    unreachable!("the receiver threads should never finish");
 }
